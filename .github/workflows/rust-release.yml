@@ -503,6 +503,26 @@ jobs:
             fi
           done
 
+          # Stage Apache-2.0 LICENSE + NOTICE + attribution file. These must
+          # accompany every binary copy (Apache-2.0 §4(a)(c)). Written into
+          # $dest so the Compress artifacts step can bundle them with each
+          # per-binary tar.gz.
+          cp "${GITHUB_WORKSPACE}/LICENSE" "$dest/LICENSE"
+          cp "${GITHUB_WORKSPACE}/NOTICE" "$dest/NOTICE"
+          cat > "$dest/SOURCE.txt" <<EOF
+          This binary is built from rsclaw-ai/codex,
+          a fork of openai/codex (Apache-2.0).
+
+          Upstream: https://github.com/openai/codex
+          Fork:     https://github.com/rsclaw-ai/codex
+          Version:  ${GITHUB_REF_NAME}
+          Target:   ${{ matrix.target }}
+          Commit:   ${GITHUB_SHA}
+          License:  Apache-2.0 (see LICENSE, NOTICE)
+
+          This is a third-party build. No affiliation with OpenAI.
+          EOF
+
           if [[ "${{ matrix.target }}" == *linux* && "${{ matrix.bundle }}" == "primary" ]]; then
             bundle_root="${RUNNER_TEMP}/codex-${{ matrix.target }}-bundle"
             rm -rf "$bundle_root"
@@ -510,7 +530,11 @@ jobs:
             cp "$dest/codex-${{ matrix.target }}" "$bundle_root/codex"
             cp "$dest/bwrap-${{ matrix.target }}" "$bundle_root/codex-resources/bwrap"
             chmod 0755 "$bundle_root/codex" "$bundle_root/codex-resources/bwrap"
-            tar -C "$bundle_root" -cf - codex codex-resources/bwrap |
+            # Apache-2.0 compliance: include license files inside the bundle.
+            cp "$dest/LICENSE" "$bundle_root/LICENSE"
+            cp "$dest/NOTICE" "$bundle_root/NOTICE"
+            cp "$dest/SOURCE.txt" "$bundle_root/SOURCE.txt"
+            tar -C "$bundle_root" -cf - codex codex-resources/bwrap LICENSE NOTICE SOURCE.txt |
               zstd -T0 -19 -o "$dest/codex-${{ matrix.target }}-bundle.tar.zst"
           fi
 
@@ -594,8 +618,8 @@ jobs:
           # For compatibility with environments that lack the `zstd` tool we
           # additionally create a `.tar.gz` alongside every binary we publish.
           # The end result is:
-          #   codex-<target>.zst          (existing)
-          #   codex-<target>.tar.gz       (new)
+          #   codex-<target>.zst          (existing, single-file)
+          #   codex-<target>.tar.gz       (per-binary, includes LICENSE/NOTICE)
 
           # 1. Produce a .tar.gz for every file in the directory *before* we
           #    run `zstd --rm`, because that flag deletes the original files.
@@ -612,13 +636,28 @@ jobs:
               continue
             fi
 
-            # Create per-binary tar.gz
-            tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base"
+            # Skip license files themselves; they get bundled into each
+            # binary's tar.gz below.
+            if [[ "$base" == LICENSE || "$base" == NOTICE || "$base" == SOURCE.txt ]]; then
+              continue
+            fi
+
+            # Create per-binary tar.gz that includes LICENSE/NOTICE/SOURCE.txt
+            # alongside the binary, satisfying Apache-2.0 §4 redistribution
+            # terms.
+            tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base" LICENSE NOTICE SOURCE.txt
 
             # Also create .zst and remove the uncompressed binaries to keep
-            # non-Windows artifact directories small.
+            # non-Windows artifact directories small. The .zst is a single-file
+            # compression (no archive), so the license accompanies it via the
+            # .tar.gz sibling and the project's release page.
             zstd -T0 -19 --rm "$dest/$base"
           done
+
+          # Remove the bare LICENSE/NOTICE/SOURCE.txt so they don't show up as
+          # standalone files in the uploaded artifact bundle. They are already
+          # embedded inside every per-binary tar.gz above.
+          rm -f "$dest/LICENSE" "$dest/NOTICE" "$dest/SOURCE.txt"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         if: ${{ runner.os != 'macOS' || env.SIGN_MACOS == 'true' }}

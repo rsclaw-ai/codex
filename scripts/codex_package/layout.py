@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .targets import PackageInputs
 from .targets import PackageVariant
+from .targets import REPO_ROOT
 from .targets import TargetSpec
 from .zsh import ZSH_RESOURCE_PATH
 
@@ -75,6 +76,11 @@ def build_package_dir(
             is_windows=True,
         )
 
+    # Apache-2.0 compliance: ship LICENSE + NOTICE + attribution alongside
+    # the binaries. §4(a) requires the LICENSE to accompany every copy of
+    # the work; §4(c) requires NOTICE contents to be preserved.
+    _copy_license_files(package_dir, version, spec, variant)
+
     metadata = {
         "layoutVersion": LAYOUT_VERSION,
         "version": version,
@@ -85,6 +91,35 @@ def build_package_dir(
         "pathDir": "codex-path",
     }
     write_json(package_dir / "codex-package.json", metadata)
+
+
+def _copy_license_files(
+    package_dir: Path,
+    version: str,
+    spec: TargetSpec,
+    variant: PackageVariant,
+) -> None:
+    license_src = REPO_ROOT / "LICENSE"
+    notice_src = REPO_ROOT / "NOTICE"
+    if license_src.is_file():
+        shutil.copyfile(license_src, package_dir / "LICENSE")
+    if notice_src.is_file():
+        shutil.copyfile(notice_src, package_dir / "NOTICE")
+    source_lines = [
+        "This binary is built from rsclaw-ai/codex,",
+        "a fork of openai/codex (Apache-2.0).",
+        "",
+        "Upstream: https://github.com/openai/codex",
+        "Fork:     https://github.com/rsclaw-ai/codex",
+        f"Version:  {version}",
+        f"Target:   {spec.target}",
+        f"Variant:  {variant.name}",
+        "License:  Apache-2.0 (see LICENSE, NOTICE)",
+        "",
+        "This is a third-party build. No affiliation with OpenAI.",
+        "",
+    ]
+    (package_dir / "SOURCE.txt").write_text("\n".join(source_lines), encoding="utf-8")
 
 
 def validate_package_dir(

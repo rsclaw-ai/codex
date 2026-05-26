@@ -220,6 +220,25 @@ jobs:
               "$dest/${binary}-${{ matrix.target }}.exe"
           done
 
+          # Apache-2.0 §4: LICENSE + NOTICE must accompany every redistributed
+          # copy. Stage them and an attribution file into $dest so the
+          # Compress artifacts step bundles them into every archive.
+          cp "${GITHUB_WORKSPACE}/LICENSE" "$dest/LICENSE"
+          cp "${GITHUB_WORKSPACE}/NOTICE" "$dest/NOTICE"
+          cat > "$dest/SOURCE.txt" <<EOF
+          This binary is built from rsclaw-ai/codex,
+          a fork of openai/codex (Apache-2.0).
+
+          Upstream: https://github.com/openai/codex
+          Fork:     https://github.com/rsclaw-ai/codex
+          Version:  ${GITHUB_REF_NAME}
+          Target:   ${{ matrix.target }}
+          Commit:   ${GITHUB_SHA}
+          License:  Apache-2.0 (see LICENSE, NOTICE)
+
+          This is a third-party build. No affiliation with OpenAI.
+          EOF
+
       - name: Install DotSlash
         uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
 
@@ -300,8 +319,15 @@ jobs:
               continue
             fi
 
-            # Create per-binary tar.gz
-            tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base"
+            # Skip license files themselves; they get bundled into each
+            # binary's archive below.
+            if [[ "$base" == LICENSE || "$base" == NOTICE || "$base" == SOURCE.txt ]]; then
+              continue
+            fi
+
+            # Create per-binary tar.gz, bundled with LICENSE/NOTICE/SOURCE.txt
+            # to satisfy Apache-2.0 §4 redistribution terms.
+            tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base" LICENSE NOTICE SOURCE.txt
 
             # Create zip archive for Windows binaries.
             # Must run from inside the dest dir so 7z won't embed the
@@ -318,22 +344,31 @@ jobs:
                 cp "$dest/$base" "$bundle_dir/$base"
                 cp "$runner_src" "$bundle_dir/codex-command-runner.exe"
                 cp "$setup_src" "$bundle_dir/codex-windows-sandbox-setup.exe"
+                # Apache-2.0: also bundle license + attribution into the zip.
+                cp "$dest/LICENSE" "$bundle_dir/LICENSE"
+                cp "$dest/NOTICE" "$bundle_dir/NOTICE"
+                cp "$dest/SOURCE.txt" "$bundle_dir/SOURCE.txt"
                 # Use an absolute path so bundle zips land in the real dist
                 # dir even when 7z runs from a temp directory.
                 (cd "$bundle_dir" && 7z a "$repo_root/$dest/${base}.zip" .)
               else
                 echo "warning: missing sandbox binaries; falling back to single-binary zip"
                 echo "warning: expected $runner_src and $setup_src"
-                (cd "$dest" && 7z a "${base}.zip" "$base")
+                (cd "$dest" && 7z a "${base}.zip" "$base" LICENSE NOTICE SOURCE.txt)
               fi
               rm -rf "$bundle_dir"
             else
-              (cd "$dest" && 7z a "${base}.zip" "$base")
+              (cd "$dest" && 7z a "${base}.zip" "$base" LICENSE NOTICE SOURCE.txt)
             fi
 
             # Keep raw executables and produce .zst alongside them.
             "${GITHUB_WORKSPACE}/.github/workflows/zstd" -T0 -19 "$dest/$base"
           done
+
+          # Remove bare LICENSE/NOTICE/SOURCE.txt so they don't ship as
+          # standalone files in the artifact bundle. They are already
+          # embedded inside every per-binary archive above.
+          rm -f "$dest/LICENSE" "$dest/NOTICE" "$dest/SOURCE.txt"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
