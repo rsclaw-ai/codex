@@ -32,16 +32,29 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: codex-rs
+    # Heavy memory savings so github-hosted runners can compile the
+    # codex-rs workspace (100+ crates) without OOM during link.
+    # Upstream release profile uses lto="fat" which 14-16 GB runners
+    # cannot link. Override profile knobs via env so we don't touch
+    # Cargo.toml (keeps sync with upstream clean).
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_NET_RETRY: "10"
+      RUSTFLAGS: "-C debuginfo=0 -C strip=symbols"
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             archive: tar.gz
             binary: codex
           - target: x86_64-apple-darwin
