@@ -61,6 +61,7 @@ pub struct Cli {
     pub color: Color,
 
     /// Print events to stdout as JSONL.
+    /// Deprecated: prefer `--output-format=json`.
     #[arg(
         long = "json",
         alias = "experimental-json",
@@ -68,6 +69,19 @@ pub struct Cli {
         global = true
     )]
     pub json: bool,
+
+    /// Output format for agent events.
+    /// - `human` (default): ANSI-colored output to stderr, final message to stdout.
+    /// - `json`: JSONL events to stdout (same as `--json`).
+    /// - `stream-json`: Claude-compatible NDJSON to stdout (bidirectional with `--input-format=stream-json`).
+    #[arg(long = "output-format", value_enum, default_value_t = OutputFormat::Human, global = true)]
+    pub output_format: OutputFormat,
+
+    /// Input format for user prompts.
+    /// - `prompt` (default): read from positional argument or stdin.
+    /// - `stream-json`: read Claude-compatible NDJSON from stdin.
+    #[arg(long = "input-format", value_enum, default_value_t = InputFormat::Prompt, global = true)]
+    pub input_format: InputFormat,
 
     /// Specifies file where the last message from the agent should be written.
     #[arg(
@@ -304,6 +318,25 @@ pub enum Color {
     Never,
     #[default]
     Auto,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum OutputFormat {
+    #[default]
+    Human,
+    Json,
+    /// Claude-compatible NDJSON on stdout (bidirectional with --input-format=stream-json).
+    StreamJson,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum InputFormat {
+    #[default]
+    Prompt,
+    /// Read Claude-compatible NDJSON from stdin.
+    StreamJson,
 }
 
 #[cfg(test)]

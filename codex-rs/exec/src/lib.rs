@@ -8,6 +8,7 @@ mod cli;
 mod event_processor;
 mod event_processor_with_human_output;
 pub(crate) mod event_processor_with_jsonl_output;
+pub(crate) mod event_processor_with_stream_json;
 pub(crate) mod exec_events;
 
 pub use cli::Cli;
@@ -202,7 +203,8 @@ struct ExecRunArgs {
     dangerously_bypass_approvals_and_sandbox: bool,
     exec_span: tracing::Span,
     images: Vec<PathBuf>,
-    json_mode: bool,
+    output_format: cli::OutputFormat,
+    input_format: cli::InputFormat,
     last_message_file: Option<PathBuf>,
     model_provider: Option<String>,
     oss: bool,
@@ -250,11 +252,19 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         removed_full_auto,
         color,
         last_message_file,
-        json: json_mode,
+        json: json_flag,
+        output_format,
+        input_format,
         prompt,
         output_schema: output_schema_path,
         config_overrides,
     } = cli;
+    // --json is a shorthand for --output-format=json
+    let output_format = if json_flag {
+        cli::OutputFormat::Json
+    } else {
+        output_format
+    };
     let shared = shared.into_inner();
     let SharedCliOptions {
         images,
@@ -548,7 +558,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         dangerously_bypass_approvals_and_sandbox,
         exec_span: exec_span.clone(),
         images,
-        json_mode,
+        output_format,
+        input_format,
         last_message_file,
         model_provider,
         oss,
@@ -570,7 +581,8 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         dangerously_bypass_approvals_and_sandbox,
         exec_span,
         images,
-        json_mode,
+        output_format,
+        input_format,
         last_message_file,
         model_provider,
         oss,
@@ -580,9 +592,17 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         stderr_with_ansi,
     } = args;
 
-    let mut event_processor: Box<dyn EventProcessor> = match json_mode {
-        true => Box::new(EventProcessorWithJsonOutput::new(last_message_file.clone())),
-        _ => Box::new(EventProcessorWithHumanOutput::create_with_ansi(
+    let mut event_processor: Box<dyn EventProcessor> = match output_format {
+        cli::OutputFormat::StreamJson => Box::new(
+            event_processor_with_stream_json::StreamJsonProcessor::new(
+                last_message_file.clone(),
+                config.model.clone(),
+            ),
+        ),
+        cli::OutputFormat::Json => {
+            Box::new(EventProcessorWithJsonOutput::new(last_message_file.clone()))
+        }
+        cli::OutputFormat::Human => Box::new(EventProcessorWithHumanOutput::create_with_ansi(
             stderr_with_ansi,
             &config,
             last_message_file.clone(),
@@ -751,7 +771,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     // Print the effective configuration and initial request so users can see what Codex
     // is using.
     event_processor.print_config_summary(&config, &prompt_summary, &session_configured);
-    if !json_mode
+    if output_format == cli::OutputFormat::Human
         && let Some(message) =
             codex_core::config::system_bwrap_warning(config.permissions.permission_profile())
     {
@@ -759,6 +779,21 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
 
     info!("Codex initialized with event: {session_configured:?}");
+
+    // In stream-json input mode, dispatch to the multi-turn stdin loop.
+    if input_format == cli::InputFormat::StreamJson {
+        return run_stream_json_session(
+            client,
+            &config,
+            session_configured.clone(),
+            default_cwd.clone(),
+            default_approval_policy,
+            default_effort,
+            config.model.clone(),
+            last_message_file,
+        )
+        .await;
+    }
 
     let (interrupt_tx, mut interrupt_rx) = mpsc::unbounded_channel::<()>();
     tokio::spawn(async move {
@@ -929,6 +964,236 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 warn!("{message}");
                 event_processor.process_warning(message);
             }
+        }
+    }
+
+    if let Err(err) = client.shutdown().await {
+        warn!("in-process app-server shutdown failed: {err}");
+    }
+    event_processor.print_final_output();
+    if error_seen {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Run in stream-json input/output mode: read Claude-compatible NDJSON from stdin,
+/// drive turns, emit Claude-compatible NDJSON to stdout. Multi-turn: stays alive
+/// until stdin EOF.
+#[expect(clippy::too_many_arguments, reason = "stream-json session needs explicit config fields")]
+async fn run_stream_json_session(
+    mut client: InProcessAppServerClient,
+    config: &Config,
+    session_configured: SessionConfiguredEvent,
+    default_cwd: std::path::PathBuf,
+    default_approval_policy: codex_protocol::protocol::AskForApproval,
+    default_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+    model: Option<String>,
+    last_message_path: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut event_processor: Box<dyn EventProcessor> = Box::new(
+        event_processor_with_stream_json::StreamJsonProcessor::new(last_message_path, model),
+    );
+
+    let mut request_ids = RequestIdSequencer::new();
+
+    event_processor.print_config_summary(config, "", &session_configured);
+
+    let (interrupt_tx, mut interrupt_rx) = mpsc::unbounded_channel::<()>();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::debug!("Keyboard interrupt");
+            let _ = interrupt_tx.send(());
+        }
+    });
+
+    let primary_thread_id_str = session_configured.thread_id.to_string();
+    let stdin = tokio::io::stdin();
+    let mut stdin_lines = tokio::io::BufReader::new(stdin).lines();
+
+    // Read first stdin line.
+    let first_line = match stdin_lines.next_line().await {
+        Ok(Some(line)) => line,
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(anyhow::anyhow!("failed to read stdin: {e}")),
+    };
+    let initial_prompt = parse_stream_json_user_message(&first_line)?;
+
+    // Send initial turn.
+    let mut task_id = {
+        let items = vec![UserInput::Text {
+            text: initial_prompt,
+            text_elements: Vec::new(),
+        }];
+        let response: TurnStartResponse = send_request_with_response(
+            &client,
+            ClientRequest::TurnStart {
+                request_id: request_ids.next(),
+                params: TurnStartParams {
+                    thread_id: primary_thread_id_str.clone(),
+                    input: items.into_iter().map(Into::into).collect(),
+                    responsesapi_client_metadata: None,
+                    environments: None,
+                    cwd: Some(default_cwd.clone()),
+                    runtime_workspace_roots: None,
+                    approval_policy: Some(default_approval_policy.into()),
+                    approvals_reviewer: None,
+                    sandbox_policy: None,
+                    permissions: None,
+                    model: None,
+                    service_tier: None,
+                    effort: default_effort,
+                    summary: None,
+                    personality: None,
+                    output_schema: None,
+                    collaboration_mode: None,
+                },
+            },
+            "turn/start",
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        response.turn.id
+    };
+
+    // Multi-turn event loop.
+    let mut error_seen = false;
+    let mut interrupt_channel_open = true;
+    loop {
+        let server_event = tokio::select! {
+            maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open => {
+                if maybe_interrupt.is_none() {
+                    interrupt_channel_open = false;
+                    continue;
+                }
+                if let Err(err) = send_request_with_response::<TurnInterruptResponse>(
+                    &client,
+                    ClientRequest::TurnInterrupt {
+                        request_id: request_ids.next(),
+                        params: TurnInterruptParams {
+                            thread_id: primary_thread_id_str.clone(),
+                            turn_id: task_id.clone(),
+                        },
+                    },
+                    "turn/interrupt",
+                )
+                .await
+                {
+                    warn!("turn/interrupt failed: {err}");
+                }
+                continue;
+            }
+            maybe_event = client.next_event() => maybe_event,
+        };
+
+        let Some(server_event) = server_event else {
+            break;
+        };
+
+        let mut should_shutdown = false;
+        match server_event {
+            InProcessServerEvent::ServerRequest(request) => {
+                handle_server_request(&client, request, &mut error_seen).await;
+            }
+            InProcessServerEvent::ServerNotification(notification) => {
+                if let ServerNotification::Error(payload) = &notification {
+                    if payload.thread_id == primary_thread_id_str
+                        && payload.turn_id == task_id
+                        && !payload.will_retry
+                    {
+                        error_seen = true;
+                    }
+                } else if let ServerNotification::TurnCompleted(payload) = &notification
+                    && payload.thread_id == primary_thread_id_str
+                    && payload.turn.id == task_id
+                    && matches!(
+                        payload.turn.status,
+                        codex_app_server_protocol::TurnStatus::Failed
+                            | codex_app_server_protocol::TurnStatus::Interrupted
+                    )
+                {
+                    error_seen = true;
+                }
+
+                match event_processor.process_server_notification(notification) {
+                    CodexStatus::Running => {}
+                    CodexStatus::InitiateShutdown => {
+                        // Turn completed — read next stdin line for next turn.
+                        let next_line = match stdin_lines.next_line().await {
+                            Ok(Some(line)) => Some(line),
+                            Ok(None) => None,
+                            Err(e) => {
+                                warn!("stdin read error: {e}");
+                                None
+                            }
+                        };
+
+                        match next_line.and_then(|l| parse_stream_json_user_message(&l).ok()) {
+                            Some(prompt) => {
+                                let items = vec![UserInput::Text {
+                                    text: prompt,
+                                    text_elements: Vec::new(),
+                                }];
+                                match send_request_with_response::<TurnStartResponse>(
+                                    &client,
+                                    ClientRequest::TurnStart {
+                                        request_id: request_ids.next(),
+                                        params: TurnStartParams {
+                                            thread_id: primary_thread_id_str.clone(),
+                                            input: items.into_iter().map(Into::into).collect(),
+                                            responsesapi_client_metadata: None,
+                                            environments: None,
+                                            cwd: Some(default_cwd.clone()),
+                                            runtime_workspace_roots: None,
+                                            approval_policy: Some(default_approval_policy.into()),
+                                            approvals_reviewer: None,
+                                            sandbox_policy: None,
+                                            permissions: None,
+                                            model: None,
+                                            service_tier: None,
+                                            effort: default_effort,
+                                            summary: None,
+                                            personality: None,
+                                            output_schema: None,
+                                            collaboration_mode: None,
+                                        },
+                                    },
+                                    "turn/start",
+                                )
+                                .await
+                                {
+                                    Ok(response) => {
+                                        task_id = response.turn.id;
+                                        continue;
+                                    }
+                                    Err(err) => {
+                                        warn!("turn/start failed: {err}");
+                                        should_shutdown = true;
+                                    }
+                                }
+                            }
+                            None => {
+                                should_shutdown = true;
+                            }
+                        }
+                    }
+                }
+            }
+            InProcessServerEvent::Lagged { skipped } => {
+                let message = lagged_event_warning_message(skipped);
+                warn!("{message}");
+                event_processor.process_warning(message);
+            }
+        }
+
+        if should_shutdown {
+            if let Err(err) = request_shutdown(&client, &mut request_ids, &primary_thread_id_str).await {
+                warn!("thread/unsubscribe failed during shutdown: {err}");
+            }
+            break;
         }
     }
 
@@ -1870,6 +2135,43 @@ fn build_review_request(args: &ReviewArgs) -> anyhow::Result<ReviewRequest> {
         target,
         user_facing_hint: None,
     })
+}
+
+/// Parse a Claude-compatible stream-json user message from a single NDJSON line.
+/// Expected format: `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`
+fn parse_stream_json_user_message(line: &str) -> anyhow::Result<String> {
+    let value: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| anyhow::anyhow!("invalid stream-json line: {e}"))?;
+
+    // Validate it's a user message.
+    let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if msg_type != "user" {
+        anyhow::bail!("expected type=\"user\", got \"{msg_type}\"");
+    }
+
+    // Extract text from content array.
+    let content = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| anyhow::anyhow!("missing message.content array"))?;
+
+    let texts: Vec<&str> = content
+        .iter()
+        .filter_map(|block| {
+            if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                block.get("text").and_then(|t| t.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if texts.is_empty() {
+        anyhow::bail!("no text blocks found in user message content");
+    }
+
+    Ok(texts.join("\n"))
 }
 
 #[cfg(test)]
