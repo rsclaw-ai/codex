@@ -35,7 +35,10 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # Windows x86_64 link step is the slowest (observed 90+ min on free
+    # runner, hits the previous 90 min cap). Give all platforms 120 min;
+    # the other platforms finish in 45-80 min and don't burn the extra.
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: codex-rs
@@ -122,6 +125,9 @@ jobs:
             ~/.cargo/git
             codex-rs/target
           key: rsclaw-cargo-${{ matrix.target }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+          # Save cache even on cancellation/timeout so the next attempt
+          # picks up partial cargo state instead of starting cold.
+          save-always: true
 
       - name: Build
         shell: bash
