@@ -93,10 +93,16 @@ jobs:
         shell: bash
         run: |
           if [ -n "${{ inputs.tag }}" ]; then
-            VERSION="${{ inputs.tag }}"
+            TAG="${{ inputs.tag }}"
           else
-            VERSION="${GITHUB_REF_NAME}"
+            TAG="${GITHUB_REF_NAME}"
           fi
+          # Tag namespace is `rsclaw-vX.Y.Z` to keep this fork's release
+          # tags separate from upstream `rust-v*`. For user-facing archive
+          # filenames strip the `rsclaw-` prefix so downloads look like
+          # codex-vX.Y.Z-<target>.tar.gz instead of codex-rsclaw-vX.Y.Z-...
+          VERSION="${TAG#rsclaw-}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
