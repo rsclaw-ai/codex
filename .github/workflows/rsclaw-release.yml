@@ -103,6 +103,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Belt-and-suspenders: ensure the target std is present even if the
+      # toolchain action didn't add it (observed on macos-15 cross to
+      # x86_64-apple-darwin: error E0463 "can't find crate for `core`").
+      - name: Ensure target installed
+        shell: bash
+        run: rustup target add ${{ matrix.target }}
+
       - name: Cache cargo registry + target
         uses: actions/cache@v4
         with:
@@ -110,7 +117,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             codex-rs/target
-          key: rsclaw-cargo-${{ matrix.target }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+          key: rsclaw-cargo-${{ matrix.target }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('codex-rs/Cargo.lock') }}
 
       - name: Build
         shell: bash
