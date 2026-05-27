@@ -146,7 +146,9 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $stage = "codex-rs/stage/${{ matrix.target }}"
+          # cwd is codex-rs/ (defaults.run.working-directory), so use a
+          # relative path. Prefixing with codex-rs/ doubles the path.
+          $stage = "stage/${{ matrix.target }}"
           $out   = "$env:GITHUB_WORKSPACE/codex-${{ steps.ver.outputs.version }}-${{ matrix.target }}.zip"
           Compress-Archive -Path "$stage/${{ matrix.binary }}", "$stage/LICENSE", "$stage/NOTICE", "$stage/SOURCE.txt" `
             -DestinationPath $out
@@ -156,9 +158,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          stage="codex-rs/stage/${{ matrix.target }}"
-          chmod +x "${GITHUB_WORKSPACE}/${stage}/${{ matrix.binary }}" 2>/dev/null || true
-          "${GITHUB_WORKSPACE}/${stage}/${{ matrix.binary }}" --version || true
+          # cwd is codex-rs/, stage/ is relative to it.
+          bin="stage/${{ matrix.target }}/${{ matrix.binary }}"
+          chmod +x "$bin" 2>/dev/null || true
+          "./$bin" --version || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
