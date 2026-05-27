@@ -18,11 +18,14 @@ name: rsclaw-release
 on:
   push:
     tags:
-      - "rsclaw-v*.*.*"
+      # `v*.*.*` does NOT collide with upstream's `rust-v*` tag namespace,
+      # so the upstream rust-release.yml (which needs OpenAI self-hosted
+      # runners) won't fire on these tags.
+      - "v*.*.*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. rsclaw-v0.1.0)"
+        description: "Tag to release (e.g. v0.135.0)"
         required: true
 
 permissions:
@@ -97,13 +100,8 @@ jobs:
           else
             TAG="${GITHUB_REF_NAME}"
           fi
-          # Tag namespace is `rsclaw-vX.Y.Z` to keep this fork's release
-          # tags separate from upstream `rust-v*`. For user-facing archive
-          # filenames strip the `rsclaw-` prefix so downloads look like
-          # codex-vX.Y.Z-<target>.tar.gz instead of codex-rsclaw-vX.Y.Z-...
-          VERSION="${TAG#rsclaw-}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
