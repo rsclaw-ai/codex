@@ -57,8 +57,13 @@ jobs:
             os: macos-15
             archive: tar.gz
             binary: codex
+          # Cross-compile to Intel macOS from Apple Silicon runner.
+          # macos-13 (Intel host) free runner pool is severely backed up
+          # (jobs stuck queued >75 min). macos-15 is Apple Silicon and the
+          # SDK targets both arches, so `--target x86_64-apple-darwin`
+          # produces an Intel binary natively without QEMU.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15
             archive: tar.gz
             binary: codex
           - target: x86_64-unknown-linux-gnu
@@ -153,8 +158,12 @@ jobs:
           Compress-Archive -Path "$stage/${{ matrix.binary }}", "$stage/LICENSE", "$stage/NOTICE", "$stage/SOURCE.txt" `
             -DestinationPath $out
 
+      # Only run smoke test where host arch matches target arch. The
+      # x86_64-apple-darwin target now cross-compiles on the arm64
+      # macos-15 runner, which would need Rosetta to execute the
+      # binary -- skip rather than gamble on runner config.
       - name: Smoke test (native runner only)
-        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin' || matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'x86_64-pc-windows-msvc'
         shell: bash
         run: |
           set -euo pipefail
